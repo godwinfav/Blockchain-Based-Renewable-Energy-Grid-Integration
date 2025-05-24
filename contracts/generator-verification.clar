@@ -1,129 +1,159 @@
-;; Generator Verification Contract
-;; Validates and manages renewable energy sources
+;; Grid Stability Contract
+;; Manages system balance and stability
 
 (define-constant CONTRACT_OWNER tx-sender)
-(define-constant ERR_UNAUTHORIZED (err u100))
-(define-constant ERR_GENERATOR_EXISTS (err u101))
-(define-constant ERR_GENERATOR_NOT_FOUND (err u102))
-(define-constant ERR_INVALID_CAPACITY (err u103))
+(define-constant ERR_UNAUTHORIZED (err u300))
+(define-constant ERR_INVALID_PARAMETERS (err u301))
+(define-constant ERR_GRID_UNSTABLE (err u302))
 
-;; Generator types
-(define-constant SOLAR u1)
-(define-constant WIND u2)
-(define-constant HYDRO u3)
-(define-constant GEOTHERMAL u4)
+;; Grid status constants
+(define-constant STABLE u1)
+(define-constant WARNING u2)
+(define-constant CRITICAL u3)
+(define-constant EMERGENCY u4)
 
-;; Data structures
-(define-map generators
-  { generator-id: uint }
+;; Grid state
+(define-data-var current-load uint u0)
+(define-data-var current-generation uint u0)
+(define-data-var grid-frequency uint u5000) ;; 50.00 Hz represented as 5000
+(define-data-var grid-status uint STABLE)
+(define-data-var last-update uint u0)
+
+;; Load balancing events
+(define-map stability-events
+  { event-id: uint }
   {
-    owner: principal,
-    generator-type: uint,
-    capacity: uint,
-    location: (string-ascii 50),
-    verified: bool,
-    registration-block: uint
+    timestamp: uint,
+    event-type: uint,
+    load: uint,
+    generation: uint,
+    frequency: uint,
+    action-taken: (string-ascii 100)
   }
 )
 
-(define-map generator-stats
-  { generator-id: uint }
-  {
-    total-production: uint,
-    uptime-percentage: uint,
-    last-maintenance: uint
-  }
-)
+(define-data-var next-event-id uint u1)
 
-(define-data-var next-generator-id uint u1)
+;; Frequency thresholds (in hundredths of Hz)
+(define-constant MIN_FREQUENCY u4950) ;; 49.50 Hz
+(define-constant MAX_FREQUENCY u5050) ;; 50.50 Hz
+(define-constant CRITICAL_LOW u4900)  ;; 49.00 Hz
+(define-constant CRITICAL_HIGH u5100) ;; 51.00 Hz
 
-;; Register a new renewable energy generator
-(define-public (register-generator (generator-type uint) (capacity uint) (location (string-ascii 50)))
-  (let ((generator-id (var-get next-generator-id)))
-    (asserts! (> capacity u0) ERR_INVALID_CAPACITY)
-    (asserts! (or (is-eq generator-type SOLAR)
-                  (is-eq generator-type WIND)
-                  (is-eq generator-type HYDRO)
-                  (is-eq generator-type GEOTHERMAL)) ERR_INVALID_CAPACITY)
-
-    (map-set generators
-      { generator-id: generator-id }
-      {
-        owner: tx-sender,
-        generator-type: generator-type,
-        capacity: capacity,
-        location: location,
-        verified: false,
-        registration-block: block-height
-      }
-    )
-
-    (map-set generator-stats
-      { generator-id: generator-id }
-      {
-        total-production: u0,
-        uptime-percentage: u100,
-        last-maintenance: block-height
-      }
-    )
-
-    (var-set next-generator-id (+ generator-id u1))
-    (ok generator-id)
-  )
-)
-
-;; Verify a generator (admin only)
-(define-public (verify-generator (generator-id uint))
+;; Update grid parameters
+(define-public (update-grid-state (load uint) (generation uint) (frequency uint))
   (begin
-    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
-    (match (map-get? generators { generator-id: generator-id })
-      generator-data
-      (begin
-        (map-set generators
-          { generator-id: generator-id }
-          (merge generator-data { verified: true })
-        )
+    (asserts! (> load u0) ERR_INVALID_PARAMETERS)
+    (asserts! (> generation u0) ERR_INVALID_PARAMETERS)
+    (asserts! (> frequency u4000) ERR_INVALID_PARAMETERS) ;; Minimum 40 Hz
+    (asserts! (< frequency u6000) ERR_INVALID_PARAMETERS) ;; Maximum 60 Hz
+
+    (var-set current-load load)
+    (var-set current-generation generation)
+    (var-set grid-frequency frequency)
+    (var-set last-update block-height)
+
+    ;; Determine grid status
+    (let ((new-status (calculate-grid-status load generation frequency)))
+      (var-set grid-status new-status)
+
+      ;; Log stability event if not stable
+      (if (not (is-eq new-status STABLE))
+        (log-stability-event new-status load generation frequency)
         (ok true)
       )
-      ERR_GENERATOR_NOT_FOUND
     )
   )
 )
 
-;; Update generator production stats
-(define-public (update-production (generator-id uint) (production uint))
-  (match (map-get? generators { generator-id: generator-id })
-    generator-data
-    (begin
-      (asserts! (is-eq (get owner generator-data) tx-sender) ERR_UNAUTHORIZED)
-      (match (map-get? generator-stats { generator-id: generator-id })
-        stats-data
-        (begin
-          (map-set generator-stats
-            { generator-id: generator-id }
-            (merge stats-data { total-production: (+ (get total-production stats-data) production) })
-          )
-          (ok true)
+;; Calculate grid status based on parameters
+(define-private (calculate-grid-status (load uint) (generation uint) (frequency uint))
+  (let ((load-generation-ratio (if (> generation u0) (/ (* load u100) generation) u200))
+        (frequency-ok (and (>= frequency MIN_FREQUENCY) (<= frequency MAX_FREQUENCY))))
+
+    (if (or (<= frequency CRITICAL_LOW) (>= frequency CRITICAL_HIGH))
+      EMERGENCY
+      (if (or (not frequency-ok) (> load-generation-ratio u120) (< load-generation-ratio u80))
+        CRITICAL
+        (if (or (> load-generation-ratio u110) (< load-generation-ratio u90))
+          WARNING
+          STABLE
         )
-        ERR_GENERATOR_NOT_FOUND
       )
     )
-    ERR_GENERATOR_NOT_FOUND
+  )
+)
+
+;; Log stability events
+(define-private (log-stability-event (event-type uint) (load uint) (generation uint) (frequency uint))
+  (let ((event-id (var-get next-event-id))
+        (action (get-recommended-action event-type load generation frequency)))
+
+    (map-set stability-events
+      { event-id: event-id }
+      {
+        timestamp: block-height,
+        event-type: event-type,
+        load: load,
+        generation: generation,
+        frequency: frequency,
+        action-taken: action
+      }
+    )
+
+    (var-set next-event-id (+ event-id u1))
+    (ok true)
+  )
+)
+
+;; Get recommended action based on grid status
+(define-private (get-recommended-action (status uint) (load uint) (generation uint) (frequency uint))
+  (if (is-eq status EMERGENCY)
+    "EMERGENCY_SHUTDOWN"
+    (if (is-eq status CRITICAL)
+      (if (> load generation) "INCREASE_GENERATION" "REDUCE_LOAD")
+      (if (is-eq status WARNING)
+        "MONITOR_CLOSELY"
+        "NO_ACTION"
+      )
+    )
+  )
+)
+
+;; Emergency shutdown (admin only)
+(define-public (emergency-shutdown)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set grid-status EMERGENCY)
+    (log-stability-event EMERGENCY (var-get current-load) (var-get current-generation) (var-get grid-frequency))
   )
 )
 
 ;; Read-only functions
-(define-read-only (get-generator (generator-id uint))
-  (map-get? generators { generator-id: generator-id })
+(define-read-only (get-grid-status)
+  {
+    load: (var-get current-load),
+    generation: (var-get current-generation),
+    frequency: (var-get grid-frequency),
+    status: (var-get grid-status),
+    last-update: (var-get last-update)
+  }
 )
 
-(define-read-only (get-generator-stats (generator-id uint))
-  (map-get? generator-stats { generator-id: generator-id })
+(define-read-only (get-stability-event (event-id uint))
+  (map-get? stability-events { event-id: event-id })
 )
 
-(define-read-only (is-generator-verified (generator-id uint))
-  (match (map-get? generators { generator-id: generator-id })
-    generator-data (get verified generator-data)
-    false
+(define-read-only (is-grid-stable)
+  (is-eq (var-get grid-status) STABLE)
+)
+
+(define-read-only (get-load-generation-balance)
+  (let ((load (var-get current-load))
+        (generation (var-get current-generation)))
+    (if (> generation u0)
+      (/ (* load u100) generation)
+      u0
+    )
   )
 )
