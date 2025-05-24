@@ -9,6 +9,21 @@ requirements = []
 path = 'contracts/generator-verification.clar'
 clarity_version = 2
 epoch = 2.5
+
+[contracts.grid-stability]
+path = 'contracts/grid-stability.clar'
+clarity_version = 2
+epoch = 2.5
+
+[contracts.production-forecasting]
+path = 'contracts/production-forecasting.clar'
+clarity_version = 2
+epoch = 2.5
+
+[contracts.storage-coordination]
+path = 'contracts/storage-coordination.clar'
+clarity_version = 2
+epoch = 2.5
 [repl.analysis]
 passes = ['check_checker']
 
